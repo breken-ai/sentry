@@ -21,6 +21,7 @@ import {
 import {t, tct, tn} from 'sentry/locale';
 
 import type {AgenticProgressRun} from './types';
+import {useAgenticProgressRefocusAnalytics} from './useAgenticProgressRefocusAnalytics';
 
 type AgenticProgressStageState = AgenticProgressRun['stages'][number];
 type AgenticProgressStage = AgenticProgressStageState['stage'];
@@ -350,6 +351,8 @@ export function AgenticProgress({
   run: AgenticProgressRun;
   onboardingCode?: string;
 }) {
+  useAgenticProgressRefocusAnalytics(run);
+
   const createProjectStage = run.stages.find(stage => stage.stage === 'create_project');
   const projectSlugs = createProjectStage?.extra?.projectSlugs ?? [];
 
