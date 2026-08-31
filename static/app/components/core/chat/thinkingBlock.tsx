@@ -9,6 +9,8 @@ import {IconSeer} from 'sentry/icons';
 import {getDuration} from 'sentry/utils/duration/getDuration';
 import {SECOND} from 'sentry/utils/formatters';
 
+import {ClippedDetail} from './clippedDetail';
+
 /**
  * Returns elapsed ms between `startTime` and `endTime`.
  * While `endTime` is undefined, ticks every `intervalMs` to keep the value live.
@@ -109,7 +111,11 @@ export function ThinkingBlock({title, startTime, endTime, children}: ThinkingBlo
           {isActive ? <AnimatedEllipsis /> : null}
         </Text>
       </Disclosure.Title>
-      {children ? <Disclosure.Content>{children}</Disclosure.Content> : null}
+      {children ? (
+        <Disclosure.Content>
+          <ClippedDetail>{children}</ClippedDetail>
+        </Disclosure.Content>
+      ) : null}
     </Disclosure>
   );
 }
