@@ -422,7 +422,9 @@ class OutboxBase(Model):
         return aggregated_shard_information
 
     @classmethod
-    def get_shard_category_breakdown(cls, shard_key: Mapping[str, int]) -> list[dict[str, int]]:
+    def get_shard_category_breakdown(
+        cls, shard_key: Mapping[str, int | str]
+    ) -> list[dict[str, int]]:
         """
         For a single shard (identified by its sharding column values), returns
         depth broken down by category, ordered by depth descending. Intended
