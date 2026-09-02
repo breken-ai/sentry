@@ -16,7 +16,11 @@ from sentry.middleware.integrations.parsers.gitlab import GitlabRequestParser
 from sentry.silo.base import SiloMode
 from sentry.testutils.cases import TestCase
 from sentry.testutils.cell import override_cells
-from sentry.testutils.outbox import assert_no_webhook_payloads, assert_webhook_payloads_for_mailbox
+from sentry.testutils.outbox import (
+    assert_no_webhook_payloads,
+    assert_webhook_payloads_for_mailbox,
+    override_mailbox_bucket_count,
+)
 from sentry.testutils.silo import control_silo_test
 from sentry.types.cell import Cell
 
@@ -28,6 +32,12 @@ cell_config = (cell,)
 class GitlabRequestParserTest(TestCase):
     factory = RequestFactory()
     path = f"{IntegrationClassification.integration_prefix}gitlab/webhook/"
+
+    def setUp(self) -> None:
+        super().setUp()
+        # One request never sends fast enough to earn a split. Pin the width so these
+        # assertions stay about which bucket a key lands in.
+        self.enterContext(override_mailbox_bucket_count(64))
 
     def get_response(self, req: HttpRequest) -> HttpResponse:
         return HttpResponse(status=200, content="passthrough")

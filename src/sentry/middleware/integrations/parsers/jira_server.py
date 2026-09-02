@@ -23,8 +23,6 @@ class JiraServerRequestParser(BaseRequestParser):
     provider = IntegrationProviderSlug.JIRA_SERVER.value
     webhook_identifier = WebhookProviderIdentifier.JIRA_SERVER
 
-    mailbox_bucket_count = 10
-
     def get_response_from_issue_update_webhook(self) -> HttpResponseBase:
         token = self.match.kwargs.get("token")
         try:

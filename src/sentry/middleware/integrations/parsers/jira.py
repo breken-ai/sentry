@@ -36,8 +36,6 @@ class JiraRequestParser(BaseRequestParser):
     provider = IntegrationProviderSlug.JIRA.value
     webhook_identifier = WebhookProviderIdentifier.JIRA
 
-    mailbox_bucket_count = 10
-
     control_classes = [
         JiraDescriptorEndpoint,
         JiraSentryInstallationView,

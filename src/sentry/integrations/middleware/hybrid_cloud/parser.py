@@ -20,6 +20,7 @@ from sentry.hybridcloud.services.organization_mapping import organization_mappin
 from sentry.hybridcloud.services.organization_mapping.model import RpcOrganizationMapping
 from sentry.hybridcloud.tasks.deliver_webhooks import maybe_trigger_drain
 from sentry.hybridcloud.webhook_event_types import MAILBOX_EVENT_TYPES
+from sentry.hybridcloud.webhook_mailbox_sizing import mailbox_bucket_count
 from sentry.integrations.middleware.metrics import (
     MiddlewareHaltReason,
     MiddlewareOperationEvent,
@@ -77,18 +78,6 @@ class BaseRequestParser(ABC):
 
     webhook_identifier: ClassVar[WebhookProviderIdentifier]
     """The webhook provider identifier"""
-
-    mailbox_bucket_count: ClassVar[int] = 100
-    """How many sub-mailboxes `mailbox_bucket_id` is spread over.
-
-    Set it from the key's cardinality. A repeating key (a repository) coalesces
-    payloads onto one mailbox per value, so a high count is free. A key that barely
-    repeats (an issue) fills a bucket once and never returns, and every mailbox costs
-    a scheduler row and a dispatch slot.
-
-    A static count is the interim answer; CW-1987 sizes it from a rolling per-
-    integration rate instead. https://linear.app/getsentry/issue/CW-1987
-    """
 
     def __init__(self, request: HttpRequest, response_handler: ResponseHandler):
         self.request = request
@@ -291,8 +280,9 @@ class BaseRequestParser(ABC):
         that can be delivered in parallel. Requires the integration to implement
         `mailbox_bucket_id`
 
-        The cell is left for the fanout to add -- one mailbox is built for all of
-        them.
+        The event type is resolved before the bucket because the split is sized per
+        event type, and only the validated value may reach that: it is read out of a
+        body control has not verified.
         """
         return self._bucketed(
             MailboxName(
@@ -304,27 +294,41 @@ class BaseRequestParser(ABC):
         )
 
     def _bucketed(self, mailbox: MailboxName, data: dict[str, Any]) -> MailboxName:
-        """`mailbox` in a bucket, or unchanged where the payload carries no key to
-        bucket it on."""
+        """`mailbox` in a bucket, or unchanged where the payload does not get one.
+
+        A keyless payload lands on the unsplit mailbox however wide the split is, so
+        it is left out of the rate that sizes it.
+        """
         mailbox_bucket_id = self.mailbox_bucket_id(data)
         if mailbox_bucket_id is None:
             self._record_mailbox_routing(bucketed=False, reason="no_bucket_key")
             return mailbox
 
-        self._record_mailbox_routing(bucketed=True, reason="bucketed")
+        bucket_count = mailbox_bucket_count(mailbox)
+        if bucket_count == 1:
+            self._record_mailbox_routing(bucketed=False, reason="under_rate", buckets=1)
+            return mailbox
 
-        return mailbox.in_bucket(mailbox_bucket_id % self.mailbox_bucket_count)
+        self._record_mailbox_routing(bucketed=True, reason="bucketed", buckets=bucket_count)
 
-    def _record_mailbox_routing(self, bucketed: bool, reason: str) -> None:
-        """`reason` is the full breakdown; `bucketed` stays for the dashboards on it."""
-        metrics.incr(
-            "hybridcloud.webhookpayload.mailbox_routing",
-            tags={
-                "provider": self.provider,
-                "bucketed": "true" if bucketed else "false",
-                "reason": reason,
-            },
-        )
+        return mailbox.in_bucket(mailbox_bucket_id % bucket_count)
+
+    def _record_mailbox_routing(
+        self, bucketed: bool, reason: str, buckets: int | None = None
+    ) -> None:
+        """`reason` is the full breakdown; `bucketed` stays for the dashboards on it.
+
+        `buckets` is left off the path that never consults a count, so a query for
+        split width does not average in routing that has no width.
+        """
+        tags = {
+            "provider": self.provider,
+            "bucketed": "true" if bucketed else "false",
+            "reason": reason,
+        }
+        if buckets is not None:
+            tags["buckets"] = str(buckets)
+        metrics.incr("hybridcloud.webhookpayload.mailbox_routing", tags=tags)
 
     def mailbox_bucket_id(self, data: dict[str, Any]) -> int | None:
         raise NotImplementedError(

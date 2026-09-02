@@ -22,8 +22,6 @@ class VstsRequestParser(BaseRequestParser):
     provider = IntegrationProviderSlug.AZURE_DEVOPS.value
     webhook_identifier = WebhookProviderIdentifier.VSTS
 
-    mailbox_bucket_count = 10
-
     cell_view_classes = [WorkItemWebhook]
 
     @control_silo_function
