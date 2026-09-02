@@ -165,6 +165,162 @@ describe('SpanEvidenceKeyValueList', () => {
     });
   });
 
+  describe('N+1 Database Queries repeating-span deduping', () => {
+    // Occurrences built from segments carry the span group as a `sentry.group` attribute rather
+    // than as `hash`, which isn't part of Relay's span schema and so never reaches nodestore.
+    function buildEvent(
+      offenders: Array<{
+        description: string;
+        data?: Record<string, any>;
+        hash?: string;
+      }>
+    ) {
+      const builder = new TransactionEventBuilder('a1', '/');
+      builder.getEventFixture().projectID = '415908';
+
+      const parentSpan = new MockSpan({
+        startTimestamp: 0,
+        endTimestamp: 0.2,
+        op: 'http.server',
+        problemSpan: ProblemSpan.PARENT,
+      });
+
+      offenders.forEach(({description, data, hash}, i) => {
+        parentSpan.addChild({
+          startTimestamp: i,
+          endTimestamp: i + 1,
+          op: 'db',
+          description,
+          data,
+          hash,
+          problemSpan: ProblemSpan.OFFENDER,
+        });
+      });
+
+      builder.addSpan(parentSpan);
+      return builder.getEventFixture();
+    }
+
+    it('dedupes on the span group attribute, not the description', () => {
+      // The two dogs queries share a group but differ in text, so they have to collapse into a
+      // single row. If we compared descriptions instead, they'd get a row each.
+      const event = buildEvent([
+        {
+          description: 'SELECT * FROM dogs WHERE id = 1121',
+          data: {'sentry.group': 'dog_pack'},
+        },
+        {
+          description: 'SELECT * FROM dogs WHERE id = 1231',
+          data: {'sentry.group': 'dog_pack'},
+        },
+        {
+          description: 'SELECT * FROM tricks WHERE id = 908',
+          data: {'sentry.group': 'talent_show'},
+        },
+      ]);
+
+      render(<SpanEvidenceKeyValueList event={event} projectSlug={projectSlug} />);
+
+      // Two groups, so two rows. Only the first row gets a subject - and it's labelled with the
+      // total span count, not the row count - so every row after it lands on the bare test id.
+      expect(
+        screen.getByTestId('span-evidence-key-value-list.repeating-spans-3')
+      ).toHaveTextContent('SELECT * FROM dogs WHERE id = 1121');
+      expect(
+        screen.getAllByTestId('span-evidence-key-value-list.') // All remaining rows
+      ).toHaveLength(1);
+      expect(screen.getByTestId('span-evidence-key-value-list.')).toHaveTextContent(
+        'SELECT * FROM tricks WHERE id = 908'
+      );
+      // The second dogs query shares a group with the first, so it gets no row of its own. Keyed
+      // on the id, because that's the only thing distinguishing the two dogs queries.
+      expect(screen.getByRole('table')).not.toHaveTextContent('1231');
+    });
+
+    it('falls back to the span grouping hash when Relay set no group', () => {
+      // Relay skips ops it can't scrub, so a segment-derived span can have a description and no
+      // `sentry.group`. Our own hash rides along in `data` to cover exactly that case.
+      const event = buildEvent([
+        {
+          description: 'SELECT * FROM dogs WHERE id = 1121',
+          data: {hash: 'dog_pack'},
+        },
+        {
+          description: 'SELECT * FROM dogs WHERE id = 1231',
+          data: {hash: 'dog_pack'},
+        },
+        {
+          description: 'SELECT * FROM tricks WHERE id = 908',
+          data: {hash: 'talent_show'},
+        },
+      ]);
+
+      render(<SpanEvidenceKeyValueList event={event} projectSlug={projectSlug} />);
+
+      // Two hashes, so two rows, exactly as when Relay does supply a group.
+      expect(
+        screen.getByTestId('span-evidence-key-value-list.repeating-spans-3')
+      ).toHaveTextContent('SELECT * FROM dogs WHERE id = 1121');
+      expect(screen.getAllByTestId('span-evidence-key-value-list.')).toHaveLength(1);
+      expect(screen.getByTestId('span-evidence-key-value-list.')).toHaveTextContent(
+        'SELECT * FROM tricks WHERE id = 908'
+      );
+      // The second dogs query shares a hash with the first, so it gets no row of its own.
+      expect(screen.getByRole('table')).not.toHaveTextContent('1231');
+    });
+
+    it('does not split rows by parameter value when spans share a hash', () => {
+      // The whole reason to compare hashes rather than descriptions: span grouping parametrizes
+      // queries, so these are one repeating query, not three.
+      const event = buildEvent([
+        {
+          description: 'SELECT * FROM dogs WHERE id = 1121',
+          data: {hash: 'dog_pack'},
+        },
+        {
+          description: 'SELECT * FROM dogs WHERE id = 1231',
+          data: {hash: 'dog_pack'},
+        },
+        {
+          description: 'SELECT * FROM dogs WHERE id = 415',
+          data: {hash: 'dog_pack'},
+        },
+      ]);
+
+      render(<SpanEvidenceKeyValueList event={event} projectSlug={projectSlug} />);
+
+      // One row, so nothing lands on the bare test id. The row is labelled with the total span
+      // count, which stays at 3 even though the three spans collapsed into one row.
+      expect(
+        screen.getByTestId('span-evidence-key-value-list.repeating-spans-3')
+      ).toHaveTextContent('SELECT * FROM dogs WHERE id = 1121');
+      expect(
+        screen.queryByTestId('span-evidence-key-value-list.')
+      ).not.toBeInTheDocument();
+      expect(screen.getByRole('table')).not.toHaveTextContent('1231');
+      expect(screen.getByRole('table')).not.toHaveTextContent('415');
+    });
+
+    it('still dedupes transaction-derived spans, which carry the group as hash', () => {
+      const event = buildEvent([
+        {description: 'SELECT * FROM dogs WHERE id = 1121', hash: 'dog_pack'},
+        {description: 'SELECT * FROM dogs WHERE id = 1231', hash: 'dog_pack'},
+      ]);
+
+      render(<SpanEvidenceKeyValueList event={event} projectSlug={projectSlug} />);
+
+      // Top-level `hash` rather than either group location, so this is the pre-existing behaviour
+      // the fallback chain has to preserve: one row, no second one.
+      expect(
+        screen.getByTestId('span-evidence-key-value-list.repeating-spans-2')
+      ).toHaveTextContent('SELECT * FROM dogs WHERE id = 1121');
+      expect(
+        screen.queryByTestId('span-evidence-key-value-list.')
+      ).not.toBeInTheDocument();
+      expect(screen.getByRole('table')).not.toHaveTextContent('1231');
+    });
+  });
+
   describe('MN+1 Database Queries', () => {
     const builder = new TransactionEventBuilder('a1', '/');
     builder.getEventFixture().projectID = '123';
