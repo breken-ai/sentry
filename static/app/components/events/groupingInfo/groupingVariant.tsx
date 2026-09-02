@@ -1,6 +1,7 @@
 import styled from '@emotion/styled';
 
 import {KeyValueList} from 'sentry/components/events/interfaces/keyValueList';
+import {getSpanHash} from 'sentry/components/events/interfaces/performance/utils';
 import type {RawSpanType} from 'sentry/components/events/interfaces/spans/types';
 import {QuestionTooltip} from 'sentry/components/questionTooltip';
 import {IconCheckmark, IconClose} from 'sentry/icons';
@@ -117,7 +118,7 @@ export function GroupingVariant({
         const spansToHashes = Object.fromEntries(
           event.entries
             .find((c): c is EntrySpans => c.type === 'spans')
-            ?.data?.map((span: RawSpanType) => [span.span_id, span.hash]) ?? []
+            ?.data?.map((span: RawSpanType) => [span.span_id, getSpanHash(span)]) ?? []
         );
 
         data.push(
