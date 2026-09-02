@@ -147,6 +147,12 @@ class OutboxBase(Model):
             else:
                 raise
 
+    def _silo_and_type_tags(self) -> dict[str, str]:
+        return {
+            "silo": SiloMode.get_current_mode().value.lower(),
+            "type": type(self).__name__,
+        }
+
     def key_from(self, attrs: Iterable[str]) -> Mapping[str, Any]:
         return {k: _ensure_not_null(k, getattr(self, k)) for k in attrs}
 
@@ -203,7 +209,7 @@ class OutboxBase(Model):
         if _outbox_context.flushing_enabled:
             transaction.on_commit(lambda: self.drain_shard(), using=router.db_for_write(type(self)))
 
-        tags = {"category": OutboxCategory(self.category).name}
+        tags = {"category": OutboxCategory(self.category).name, **self._silo_and_type_tags()}
         metrics.incr("outbox.saved", 1, tags=tags)
         super().save(*args, **kwargs)
 
@@ -235,7 +241,11 @@ class OutboxBase(Model):
     ) -> Generator[OutboxBase | None]:
         coalesced: OutboxBase | None = self.select_coalesced_messages().last()
         first_coalesced: OutboxBase | None = self.select_coalesced_messages().first() or coalesced
-        tags: dict[str, int | str] = {"category": "None", "synchronous": int(is_synchronous_flush)}
+        tags: dict[str, int | str] = {
+            "category": "None",
+            "synchronous": int(is_synchronous_flush),
+            **self._silo_and_type_tags(),
+        }
 
         if coalesced is not None:
             tags["category"] = OutboxCategory(self.category).name
@@ -307,6 +317,7 @@ class OutboxBase(Model):
                         tags={
                             "category": OutboxCategory(coalesced.category).name,
                             "synchronous": int(is_synchronous_flush),
+                            **coalesced._silo_and_type_tags(),
                         },
                     ),
                     start_span(op="outbox.process", name="outbox.process") as span,
@@ -383,18 +394,21 @@ class OutboxBase(Model):
     def get_shard_depths_descending(cls, limit: int | None = 10) -> list[dict[str, int | str]]:
         """
         Queries all outbox shards for their total depth, aggregated by their
-        sharding columns as specified by the outbox class implementation.
+        sharding columns as specified by the outbox class implementation, and
+        by category.
 
         :param limit: Limits the query to the top N rows with the greatest shard
         depth. If limit is None, the entire set of rows will be returned.
-        :return: A list of dictionaries, containing shard depths and shard
-        relevant column values.
+        :return: A list of dictionaries, containing shard depths, category, and
+        shard relevant column values.
         """
         if limit is not None:
             assert limit > 0, "Limit must be a positive integer if specified"
 
         base_depth_query = (
-            cls.objects.values(*cls.sharding_columns).annotate(depth=Count("*")).order_by("-depth")
+            cls.objects.values(*cls.sharding_columns, "category")
+            .annotate(depth=Count("*"))
+            .order_by("-depth")
         )
 
         if limit is not None:
@@ -405,10 +419,25 @@ class OutboxBase(Model):
             shard_information = {
                 shard_column: shard_row[shard_column] for shard_column in cls.sharding_columns
             }
+            shard_information["category"] = shard_row["category"]
             shard_information["depth"] = shard_row["depth"]
             aggregated_shard_information.append(shard_information)
 
         return aggregated_shard_information
+
+    @classmethod
+    def get_category_depths(cls) -> dict[int, int]:
+        """
+        Queries all outbox shards for their total depth, summed across all
+        shards and grouped only by category. Unlike get_shard_depths_descending,
+        this collapses the shard dimension entirely, so it's suitable for
+        SLO/backlog metrics where a shard-identifier tag would blow up
+        cardinality.
+
+        :return: A mapping of category value to total depth across all shards.
+        """
+        rows = cls.objects.values("category").annotate(depth=Count("*"))
+        return {row["category"]: row["depth"] for row in rows}
 
     @classmethod
     def get_total_outbox_count(cls) -> int:
